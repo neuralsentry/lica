@@ -1,57 +1,22 @@
 #!/usr/bin/env python3
 import subprocess
-from github import Github
+import pandas as pd
 from datetime import datetime, timedelta
-import argparse
 
 from config import *
 from helpers import *
 
-ARGS = None
-
-def parse_args():
-    """ parse command line args, using argparse """
-    parser = argparse.ArgumentParser(description="Lica is a somewhat configurable tool for analysing Linux kernel commits.")
-    parser.add_argument("--since", nargs='?', type=int, default=20,
-                        help="How many days back to search commit history?")
-    parser.add_argument("--release", nargs='?', type=str, default="latest",
-                        help="Which kernel release to analyse? Major.Minor E.g. latest, '6.1', '5.15' etc.")
-    parser.add_argument("--backports", nargs='?', type=str,
-                        help="Do you want to check to see if commits were backported? See config.py's 'coverage_list' config for details.")
-    parser.add_argument("--token", nargs='?', type=str, default="",
-                        help="Specify your GitHub API token for increased limits.")
-    parser.add_argument("--repo", nargs='?', type=str, default="gregkh/linux",
-                        help="Specify the GitHub repository you'd like to query over the API (only tested for gregkh/linux)")
-    # XXX: outfile + format
-    # XXX: granularity for filter by fix?
-    # XXX: specify cache path
-    # XXX: option to use local linux repo rather than api
-    return parser.parse_args()
-
-
-def get_commits(release=None, since=None):
-    """ wip """
-    since = datetime.now() -  timedelta(days=since)
-    repo = Github(ARGS.token).get_repo(ARGS.repo)
-
-    if release == "latest" or not release:
-        branch = "master"
-    elif release:
-        branch = "linux-" + release + ".y"
-
-    commits = repo.get_commits(sha=branch, since=since) # since
-    return commits
 
 
 def filter_commits(commits):
     """ wip """
     res = []
     threshold = 0.1
-    total = commits.totalCount
-    global STATS, ARGS
+    total = commits.shape[0]
+    global STATS
 
     print(f"|---- Filtering {total} commits\n|---- ", end='')
-    for commit in commits:
+    for index, commit in commits.iterrows():
         STATS["commits"] += 1
 
         if not filter_title(CONFIG, get_commit_title(commit)):
@@ -65,27 +30,24 @@ def filter_commits(commits):
             continue
         STATS["filtered"] += 1
 
-        reporter = get_commit_reporter(commit.commit.message)
-        CVEs = get_commit_cves(commit.commit.message) # enough to not check title?
+        reporter = get_commit_reporter(commit['commit_msg'])
+        CVEs = get_commit_cves(commit['commit_msg']) # enough to not check title?
 
         if not filter_reporter(CONFIG, reporter):
             continue
-
-        if ARGS.backports:
-            files = commit.files
-        else:
-            files = None
 
         res.append({
             "sha": commit.sha,
             "module": get_commit_module(commit),
             "title": get_commit_title(commit),
-            "message": commit.commit.message,
+            "message": commit['commit_msg'],
             "reporter": reporter,
             "cves": ",".join(list(dict.fromkeys(CVEs))), # remove duplicates
             "hits": list(dict.fromkeys(hits)), # remove duplicates
-            "files": files,
-            "coverage": "N/A"
+            "coverage": "N/A",
+            "remote_url": commit['remote_url'],
+            "date": commit['date'],
+            "labels": 1
         })
 
         if (STATS["commits"] / total) > threshold:
@@ -94,7 +56,6 @@ def filter_commits(commits):
 
     print('')
     return res
-
 
 def get_coverage(fcommits):
     """ wip """
@@ -178,24 +139,25 @@ def print_stats():
 
 
 def main():
-    global ARGS
 
     print_banner()
-    ARGS = parse_args()
 
-    print("[+] Fetching commits from GitHub API...")
-    commits = get_commits(ARGS.release, ARGS.since)
+    print("[+] Fetching commits from csv...")
+
+    df = pd.read_csv('lica/data/200_samples_linux_bugfixes_labelled.csv')
+    df = df.drop_duplicates(subset=['sha'], keep='last')
     print("[+] Filtering commits based on config.py, this may involve some more API calls...")
-    fcommits = filter_commits(commits)
-
-    if ARGS.backports:
-        print("[+] Scanning kernels to see if patches have been backported...")
-        get_coverage(fcommits)
+    fcommits = filter_commits(df)
 
     parse_stats(fcommits)
 
     print_commits(fcommits)
     print_stats()
+    # Generate prediction dataset
+    pred_ds = pred_dataset(df,fcommits)
+    y_ds = pd.read_csv('lica/data/200_samples_linux_bugfixes_labelled.csv')
+    y_ds = y_ds.drop_duplicates(subset=['sha'], keep='last')
+    generate_metrics(y_ds, pred_ds)
 
 if __name__ == "__main__":
     main()
